@@ -1,0 +1,370 @@
+       subroutine vumat(
+     1  nblock, ndir, nshr, nstatev, nfieldv, nprops, lanneal,
+     2  stepTime, totalTime, dt, cmname, coordMp, charLength,
+     3  props, density, strainInc, relSpinInc,
+     4  tempOld, stretchOld, defgradOld, fieldOld,
+     5  stressOld, stateOld, enerInternOld, enerInelasOld,
+     6  tempNew, stretchNew, defgradNew, fieldNew,
+     7  stressNew, stateNew, enerInternNew, enerInelasNew )
+c
+      include 'vaba_param.inc'
+c
+      dimension props(nprops), density(nblock),
+     1  coordMp(nblock,*),
+     2  charLength(*), strainInc(nblock,ndir+nshr),
+     3  relSpinInc(nblock,nshr), tempOld(nblock),
+     4  stretchOld(nblock,ndir+nshr), defgradOld(nblock,ndir+nshr+nshr),
+     5  fieldOld(nblock,nfieldv), stressOld(nblock,ndir+nshr),
+     6  stateOld(nblock,nstatev), enerInternOld(nblock),
+     7  enerInelasOld(nblock), tempNew(*),
+     8  stretchNew(nblock,ndir+nshr), defgradNew(nblock,ndir+nshr+nshr), 
+     9  fieldNew(nblock,nfieldv), stressNew(nblock,ndir+nshr), 
+     1  stateNew(nblock,nstatev), 
+     2  enerInternNew(nblock), enerInelasNew(nblock)
+*
+      character*80 cmname
+*
+      parameter( zero = 0.d0, one = 1.d0, two = 2.d0, half = .5d0 )
+*
+      parameter( 
+     *     iDmgFiberT   = 1,
+     *     iDmgFiberC   = 2,
+     *     iDmgMatrixT  = 3,
+     *     iDmgMatrixC  = 4,
+     *     istatusMp   = 5, 
+     *     n_svd_required = 5 )
+*
+      parameter( 
+     *     i_s33_Xx = 1, 
+     *     i_s33_Yy = 2, 
+     *     i_s33_Zz = 3,
+     *     i_s33_Xy = 4, 
+     *     i_s33_Yz = 5, 
+     *     i_s33_Zx = 6 )
+*
+* Structure of property array
+      parameter (
+     *     i_pro_E1    = 1,
+     *     i_pro_E2    = 2,
+     *     i_pro_E3    = 3,
+     *     i_pro_nu12  = 4,
+     *     i_pro_nu13  = 5,
+     *     i_pro_nu23  = 6,
+     *     i_pro_G12   = 7,
+     *     i_pro_G13   = 8,
+     *     i_pro_G23   = 9,
+     *     i_pro_sigu1t = 10,
+     *     i_pro_sigu1c = 11,
+     *     i_pro_sigu2t = 12,
+     *     i_pro_sigu2c = 13,
+     *     i_pro_sigu3t = 14,
+     *     i_pro_sigu3c = 15,
+     *     i_pro_sigu12 = 16,
+     *     i_pro_sigu13 = 17,
+     *     i_pro_sigu23 = 18 )
+*
+* Read material properties
+*
+      E1 = props(i_pro_E1)
+      E2 = props(i_pro_E2)
+      E3 = props(i_pro_E3)
+      xnu12 = props(i_pro_nu12)
+      xnu13 = props(i_pro_nu13)
+      xnu23 = props(i_pro_nu23)
+      G12 = props(i_pro_G12)
+      G13 = props(i_pro_G13)
+      G23 = props(i_pro_G23)
+*
+      xnu21 = xnu12 * E2 / E1
+      xnu31 = xnu13 * E3 / E1
+      xnu32 = xnu23 * E3 / E2
+*
+*
+* Compute terms of stiffness matrix
+      gg = one / ( one - xnu12*xnu21 - xnu23*xnu32 - xnu31*xnu13 
+     *     - two*xnu21*xnu32*xnu13 )
+      C11  = E1 * ( one - xnu23*xnu32 ) * gg
+      C22  = E2 * ( one - xnu13*xnu31 ) * gg
+      C33  = E3 * ( one - xnu12*xnu21 ) * gg
+      C12  = E1 * ( xnu21 + xnu31*xnu23 ) * gg
+      C13  = E1 * ( xnu31 + xnu21*xnu32 ) * gg
+      C23  = E2 * ( xnu32 + xnu12*xnu31 ) * gg
+*
+      f1t = props(i_pro_sigu1t)
+      f1c = props(i_pro_sigu1c)
+      f2t = props(i_pro_sigu2t)
+      f2c = props(i_pro_sigu2c)
+      f3t = props(i_pro_sigu3t)
+      f3c = props(i_pro_sigu3c)
+      f12 = props(i_pro_sigu12)
+      f13 = props(i_pro_sigu13)
+      f23 = props(i_pro_sigu23)
+*
+* Assume purely elastic material at the beginning of the analysis
+*      
+      if ( totalTime .eq. zero ) then
+         call OrthoEla3dExp ( nblock,
+     *        stateOld(nblock,iDmgFiberT),
+     *        stateOld(nblock,iDmgFiberC),
+     *        stateOld(nblock,iDmgMatrixT),
+     *        stateOld(nblock,iDmgMatrixC),
+     *        C11, C22, C33, C12, C23, C13, G12, G23, G13,
+     *        strainInc, stressOld,
+     *        stressNew )
+         return
+      end if
+*
+* Stress update 
+      call OrthoEla3dExp ( nblock,
+     *     stateOld(nblock,iDmgFiberT),
+     *     stateOld(nblock,iDmgFiberC),
+     *     stateOld(nblock,iDmgMatrixT),
+     *     stateOld(nblock,iDmgMatrixC),
+     *     C11, C22, C33, C12, C23, C13, G12, G23, G13,
+     *     strainInc, stressOld,
+     *     stressNew )
+*
+* Failure evaluation
+*
+      call Hashin3d  ( nblock, 
+     *     f1t, f2t, f3t, f1c, f2c, f3c, f12, f23, f13,
+     *     stateOld(nblock,iDmgFiberT),
+     *     stateOld(nblock,iDmgFiberC),
+     *     stateOld(nblock,iDmgMatrixT),
+     *     stateOld(nblock,iDmgMatrixC),
+     *     stateOld(nblock,istatusMp),     
+     *     stateNew(nblock,iDmgFiberT),
+     *     stateNew(nblock,iDmgFiberC),
+     *     stateNew(nblock,iDmgMatrixT),
+     *     stateNew(nblock,iDmgMatrixC),
+     *     stateNew(nblock,istatusMp), 
+     *     stressNew )
+*
+* Integrate the internal specific energy (per unit mass)
+*
+      call EnergyInternal3d ( nblock, stressOld, stressNew,
+     *   strainInc, density, enerInternOld, enerInternNew )
+*
+      return
+      end
+************************************************************
+*   Constitutive relation                                  *
+************************************************************
+      subroutine OrthoEla3dExp ( nblock,
+     *     dmgFiberT, dmgFiberC, dmgMatrixT, dmgMatrixC,
+     *     C11, C22, C33, C12, C23, C13, G12, G23, G13,
+     *     strain, stressO, stress )
+*
+      include 'vaba_param.inc'
+*
+      parameter( zero = 0.d0, one = 1.d0, two = 2.d0)
+      parameter( 
+     *     i_s33_Xx = 1, 
+     *     i_s33_Yy = 2, 
+     *     i_s33_Zz = 3,
+     *     i_s33_Xy = 4, 
+     *     i_s33_Yz = 5, 
+     *     i_s33_Zx = 6,
+     *     n_s33_Car = 6 )
+*
+      dimension  strain(nblock,n_s33_Car), 
+     *     dmgFiberT(nblock), dmgFiberC(nblock), 
+     *     dmgMatrixT(nblock), dmgMatrixC(nblock), 
+     *     stressO(nblock,n_s33_Car),
+     *     stress(nblock,n_s33_Car)
+*     -- shear fraction in matrix tension and compression mode
+      parameter ( smt = 0.9d0, smc = 0.5d0 )
+*
+      do k = 1, nblock
+*     -- Compute damaged stiffness
+         dft = dmgFiberT(k)
+         dfc = dmgFiberC(k)
+         dmt = dmgMatrixT(k)
+         dmc = dmgMatrixC(k)
+         df = one - ( one - dft ) * ( one - dfc ) 
+*
+         dC11 = ( one - df ) * C11
+         dC22 = ( one - df ) * ( one - dmt ) * ( one - dmc ) * C22
+         dC33 = ( one - df ) * ( one - dmt ) * ( one - dmc ) * C33
+         dC12 = ( one - df ) * ( one - dmt ) * ( one - dmc ) * C12
+         dC23 = ( one - df ) * ( one - dmt ) * ( one - dmc ) * C23
+         dC13 = ( one - df ) * ( one - dmt ) * ( one - dmc ) * C13
+         dG12 = ( one - df ) 
+     *        * ( one - smt*dmt ) * ( one - smc*dmc ) * G12
+         dG23 = ( one - df ) 
+     *        * ( one - smt*dmt ) * ( one - smc*dmc ) * G23
+         dG13 = ( one - df ) 
+     *        * ( one - smt*dmt ) * ( one - smc*dmc ) * G13
+*     -- Stress update 
+         stress(k,i_s33_Xx) = stressO(k,i_s33_Xx)
+     *        + dC11 * strain(k,i_s33_Xx)
+     *        + dC12 * strain(k,i_s33_Yy)
+     *        + dC13 * strain(k,i_s33_Zz)
+         stress(k,i_s33_Yy) = stressO(k,i_s33_Yy) 
+     *        + dC12 * strain(k,i_s33_Xx)
+     *        + dC22 * strain(k,i_s33_Yy)
+     *        + dC23 * strain(k,i_s33_Zz)
+         stress(k,i_s33_Zz) = stressO(k,i_s33_Zz)
+     *        + dC13 * strain(k,i_s33_Xx)
+     *        + dC23 * strain(k,i_s33_Yy)
+     *        + dC33 * strain(k,i_s33_Zz)
+         stress(k,i_s33_Xy) = stressO(k,i_s33_Xy) 
+     *        + two * dG12 * strain(k,i_s33_Xy)
+         stress(k,i_s33_Yz) = stressO(k,i_s33_Yz) 
+     *        + two * dG23 * strain(k,i_s33_Yz)
+         stress(k,i_s33_Zx) = stressO(k,i_s33_Zx) 
+     *        + two * dG13 * strain(k,i_s33_Zx)
+      end do
+*     
+      return
+      end
+************************************************************
+*   Failure Criteria                                       *
+************************************************************
+      subroutine Hashin3d ( nblock,
+     *     f1t, f2t, f3t, f1c, f2c, f3c, f12, f23, f13,
+     *     dmgFiberTO, dmgFiberCO, dmgMatrixTO, dmgMatrixCO,
+     *     statusMpO, 
+     *     dmgFiberT, dmgFiberC, dmgMatrixT, dmgMatrixC,
+     *     statusMp, stress )
+*
+      include 'vaba_param.inc'
+*
+      parameter( zero = 0.d0, one = 1.d0, half = 0.5d0, three = 3.d0 )
+      parameter( 
+     *     i_s33_Xx = 1, 
+     *     i_s33_Yy = 2, 
+     *     i_s33_Zz = 3,
+     *     i_s33_Xy = 4, 
+     *     i_s33_Yz = 5, 
+     *     i_s33_Zx = 6,
+     *     n_s33_Car = 6 )
+*
+      dimension  dmgFiberTO(nblock), dmgFiberCO(nblock), 
+     *     dmgMatrixTO(nblock), dmgMatrixCO(nblock),
+     *     statusMpO(nblock), 
+     *     dmgFiberT(nblock), dmgFiberC(nblock), 
+     *     dmgMatrixT(nblock), dmgMatrixC(nblock),
+     *     statusMp(nblock),
+     *     stress(nblock,n_s33_Car) 
+*
+      f1tInv = zero
+      f2tInv = zero
+      f3tInv = zero
+      f1cInv = zero
+      f2cInv = zero
+      f3cInv = zero
+      f12Inv = zero
+      f23Inv = zero
+      f13Inv = zero
+*
+      if ( f1t .gt. zero ) f1tInv = one / f1t
+      if ( f2t .gt. zero ) f2tInv = one / f2t
+      if ( f3t .gt. zero ) f3tInv = one / f3t
+      if ( f1c .gt. zero ) f1cInv = one / f1c 
+      if ( f2c .gt. zero ) f2cInv = one / f2c
+      if ( f3c .gt. zero ) f3cInv = one / f3c
+      if ( f12 .gt. zero ) f12Inv = one / f12
+      if ( f23 .gt. zero ) f23Inv = one / f23
+      if ( f13 .gt. zero ) f13Inv = one / f13
+*
+      do k = 1, nblock
+         if ( statusMpO(k) .eq. one ) then
+*
+         s11 = stress(k,i_s33_Xx)
+         s22 = stress(k,i_s33_Yy)
+         s33 = stress(k,i_s33_Zz)
+         s12 = stress(k,i_s33_Xy)
+         s23 = stress(k,i_s33_Yz)
+         s13 = stress(k,i_s33_Zx)
+*
+*     Evaluate Fiber modes
+         if ( s11 .gt. zero ) then 
+*     -- Tensile Fiber Mode
+            rft = (s11*f1tInv )**2 + (s12*f12Inv )**2 
+     *            + (s13*f13Inv )**2 
+            if ( rft .ge. one ) then
+               dmgFiberT(k) = dmgFiberTO(k) + one
+            end if
+         else if ( s11 .lt. zero ) then 
+*     -- Compressive Fiber Mode
+            rfc = abs(s11) * f1cInv
+            if ( rfc .ge. one ) then
+               dmgFiberC(k) = dmgFiberCO(k) + one
+            end if
+         end if
+*
+*     Evaluate Matrix Modes
+         if ( ( s22 + s33 ) .gt. zero ) then 
+*     -- Tensile Matrix mode
+            rmt = ( s11 * half * f1tInv )**2 
+     *           + ( s22**2 * abs(f2tInv * f2cInv) )
+     *           + ( s12 * f12Inv )**2 
+     *           + ( s22 * (f2tInv + f2cInv) )
+            if ( rmt .ge. one ) then
+               dmgMatrixT(k) = dmgMatrixTO(k) + one
+            end if
+         else if ( ( s22 + s33 ) .lt. zero ) then 
+*     -- Compressive Matrix Mode
+            rmc = ( s11 * half * f1tInv )**2 
+     *           + ( s22**2 * abs(f2tInv * f2cInv) )
+     *           + ( s12 * f12Inv )**2 
+     *           + ( s22 * (f2tInv + f2cInv) )
+            if ( rmc .ge. one ) then
+               dmgMatrixC(k) = dmgMatrixCO(k) + one
+            end if
+          end if
+*
+          if ( dmgFiberT(k) .ge. one ) then
+            statusMp(k) = statusMpO(k) - one
+          end if
+*
+         end if
+*
+      end do
+*
+      return
+      end
+************************************************************
+*   EnergyInternal3d: Compute internal energy for 3d case  *
+************************************************************
+      subroutine EnergyInternal3d(nblock, sigOld, sigNew ,
+     *   strainInc, curDensity, enerInternOld, enerInternNew)
+*
+      include 'vaba_param.inc'
+*
+      parameter( 
+     *     i_s33_Xx = 1, 
+     *     i_s33_Yy = 2, 
+     *     i_s33_Zz = 3,
+     *     i_s33_Xy = 4, 
+     *     i_s33_Yz = 5, 
+     *     i_s33_Zx = 6,
+     *     n_s33_Car = 6 )
+*
+      parameter( two = 2.d0, half = .5d0 ) 
+*
+      dimension sigOld (nblock,n_s33_Car), sigNew (nblock,n_s33_Car),
+     *     strainInc (nblock,n_s33_Car), curDensity (nblock),
+     *     enerInternOld(nblock), enerInternNew(nblock)
+*
+      do k = 1, nblock
+         stressPower  = half * (
+     *        ( sigOld(k,i_s33_Xx) + sigNew(k,i_s33_Xx) )
+     *        * ( strainInc(k,i_s33_Xx) )
+     *        +       ( sigOld(k,i_s33_Yy) + sigNew(k,i_s33_Yy) )
+     *        * ( strainInc(k,i_s33_Yy))
+     *        +       ( sigOld(k,i_s33_Zz) + sigNew(k,i_s33_Zz) )
+     *        * ( strainInc(k,i_s33_Zz))
+     *        + two * ( sigOld(k,i_s33_Xy) + sigNew(k,i_s33_Xy) )
+     *        * strainInc(k,i_s33_Xy)
+     *        + two * ( sigOld(k,i_s33_Yz) + sigNew(k,i_s33_Yz) )
+     *        * strainInc(k,i_s33_Yz)
+     *        + two * ( sigOld(k,i_s33_Zx) + sigNew(k,i_s33_Zx) )
+     *        * strainInc(k,i_s33_Zx) )
+*     
+         enerInternNew(k) = enerInternOld(k) + stressPower/curDensity(k)
+      end do
+*     
+      return  
+      end 
